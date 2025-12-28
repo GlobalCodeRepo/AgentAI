@@ -441,3 +441,205 @@ Documentation must be continuously updated
 | Alerting improvements  | SRE Team      | Oct 05   |
 | Runbook updates        | Operations    | Sep 30   |
 
+============================================================================
+
+import os
+import warnings
+from typing import List
+
+warnings.filterwarnings("ignore")
+
+# -----------------------------
+# LangChain + CrewAI Imports
+# -----------------------------
+from langchain_community.llms import Ollama
+from langchain_community.vectorstores import FAISS
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.embeddings.base import Embeddings
+from langchain.chains import RetrievalQA
+from langchain.docstore.document import Document
+
+from crewai import Agent, Task, Crew
+
+import requests
+import json
+
+# -----------------------------
+# Custom Ollama Embeddings
+# -----------------------------
+class OllamaEmbeddings(Embeddings):
+    def __init__(self, model="llama3.2", url="http://localhost:11434/api/embeddings"):
+        self.model = model
+        self.url = url
+
+    def embed(self, text: str):
+        payload = {"model": self.model, "prompt": text}
+        response = requests.post(self.url, json=payload)
+
+        if response.status_code != 200:
+            raise Exception(f"Embedding error: {response.text}")
+
+        return response.json()["embedding"]
+
+    def embed_documents(self, texts: List[str]):
+        return [self.embed(text) for text in texts]
+
+    def embed_query(self, text: str):
+        return self.embed(text)
+
+# -----------------------------
+# Main GENAI Application Class
+# -----------------------------
+class IncidentPostmortemGenAI:
+
+    def __init__(self):
+        self.llm = Ollama(
+            model="llama3.2",
+            temperature=0.2
+        )
+
+        self.embeddings = OllamaEmbeddings()
+
+    # -----------------------------
+    # TEXT FILE LOADER (NEW)
+    # -----------------------------
+    def load_text_file(self, file_path: str) -> str:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        with open(file_path, "r", encoding="utf-8") as file:
+            return file.read()
+
+    # -----------------------------
+    # CREATE VECTOR STORE
+    # -----------------------------
+    def create_knowledge_base(self, text: str):
+        splitter = CharacterTextSplitter(
+            separator="\n",
+            chunk_size=800,
+            chunk_overlap=100
+        )
+
+        chunks = splitter.split_text(text)
+        documents = [Document(page_content=chunk) for chunk in chunks]
+
+        return FAISS.from_documents(documents, self.embeddings)
+
+    # -----------------------------
+    # CREATE AGENTS
+    # -----------------------------
+    def create_agents(self, knowledge_base):
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            retriever=knowledge_base.as_retriever()
+        )
+
+        def ask_doc(query):
+            return qa_chain.invoke({"query": query})["result"]
+
+        summary_agent = Agent(
+            role="Incident Summary Expert",
+            goal="Summarize the incident clearly and concisely",
+            backstory="Expert in technical incident summarization",
+            tools=[{
+                "name": "document_qa",
+                "description": "Answer questions from incident document",
+                "func": ask_doc
+            }],
+            llm=self.llm,
+            verbose=True
+        )
+
+        analysis_agent = Agent(
+            role="Root Cause Analyst",
+            goal="Identify technical and process root causes",
+            backstory="Senior SRE with deep troubleshooting expertise",
+            tools=[{
+                "name": "document_qa",
+                "description": "Answer questions from incident document",
+                "func": ask_doc
+            }],
+            llm=self.llm,
+            verbose=True
+        )
+
+        recommendation_agent = Agent(
+            role="Reliability Improvement Advisor",
+            goal="Provide actionable preventive recommendations",
+            backstory="System reliability and resilience architect",
+            tools=[{
+                "name": "document_qa",
+                "description": "Answer questions from incident document",
+                "func": ask_doc
+            }],
+            llm=self.llm,
+            verbose=True
+        )
+
+        return summary_agent, analysis_agent, recommendation_agent
+
+    # -----------------------------
+    # CREATE TASKS
+    # -----------------------------
+    def create_tasks(self, agents):
+        summary_agent, analysis_agent, recommendation_agent = agents
+
+        summary_task = Task(
+            description="Summarize the incident, timeline, and impact",
+            expected_output="Clear executive-level incident summary",
+            agent=summary_agent
+        )
+
+        analysis_task = Task(
+            description="Identify root causes and contributing factors",
+            expected_output="Technical and process root cause analysis",
+            agent=analysis_agent
+        )
+
+        recommendation_task = Task(
+            description="Suggest long-term preventive actions",
+            expected_output="Actionable reliability improvements",
+            agent=recommendation_agent
+        )
+
+        return [summary_task, analysis_task, recommendation_task]
+
+    # -----------------------------
+    # RUN APPLICATION
+    # -----------------------------
+    def run(self, text_file_path: str):
+        print("\n📥 Loading text file...")
+        text = self.load_text_file(text_file_path)
+
+        print("📦 Creating knowledge base...")
+        knowledge_base = self.create_knowledge_base(text)
+
+        print("🤖 Creating agents...")
+        agents = self.create_agents(knowledge_base)
+
+        print("🧠 Creating tasks...")
+        tasks = self.create_tasks(agents)
+
+        crew = Crew(
+            agents=list(agents),
+            tasks=tasks,
+            verbose=True
+        )
+
+        print("\n🚀 Running GENAI Multi-Agent System...\n")
+        result = crew.kickoff()
+
+        return result
+
+# -----------------------------
+# ENTRY POINT
+# -----------------------------
+if __name__ == "__main__":
+    app = IncidentPostmortemGenAI()
+
+    result = app.run(
+        text_file_path="data/incident_report.txt"
+    )
+
+    print("\n========== FINAL OUTPUT ==========\n")
+    print(result)
