@@ -875,3 +875,15 @@ if __name__ == "__main__":
     app = IncidentPostMortemGENAI("incident_report.txt")
     output = app.run()
     print(output.model_dump_json(indent=2))
+
+=========================================
+crewai==0.28.8
+langchain==0.1.16
+langchain-community==0.0.34
+langchain-core==0.1.45
+langchain-text-splitters==0.0.1
+pydantic==2.6.4
+faiss-cpu==1.7.4
+python-dotenv==1.0.1
+pyyaml==6.0.1
+requests==2.31.0
