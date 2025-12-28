@@ -1,0 +1,443 @@
+
+incident_postmortem_genai.py
+=≈===========================
+
+incident-postmortem-genai/
+│
+├── incident_postmortem_genai.py     # MAIN APPLICATION (single class)
+├── requirements.txt                 # dependencies
+├── data/
+│   └── incident_report.pdf          # INPUT PDF (this is critical)
+│
+├── README.md                        # optional but good
+└── .env                             # optional (future configs)
+
+================================
+
+cd incident-postmortem-genai
+pip install -r requirements.txt
+ollama run llama3.2
+python incident_postmortem_genai.py
+
+================
+Incident PDF
+   ↓
+Text Extraction (PyPDF)
+   ↓
+Semantic Chunking
+   ↓
+Embeddings (Ollama)
+   ↓
+FAISS Vector Store
+   ↓
+RetrievalQA
+   ↓
+CrewAI Multi-Agent Orchestration
+   ↓
+Structured Incident Report (Pydantic)
+
+===========================
+crewai>=0.28.0
+langchain>=0.0.267
+langchain-community>=0.0.13
+pydantic>=2.0.0
+pypdf>=3.15.1
+python-dotenv>=1.0.0
+faiss-cpu>=1.7.4
+pyyaml>=6.0
+requests>=2.31.0
+
+=====================
+
+import os
+import requests
+from typing import List, Dict
+from datetime import datetime
+
+from pypdf import PdfReader
+from pydantic import BaseModel, Field
+
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.docstore.document import Document
+from langchain.chains import RetrievalQA
+from langchain_community.llms import Ollama
+from langchain_community.vectorstores import FAISS
+from langchain.embeddings.base import Embeddings
+
+from crewai import Agent, Task, Crew
+
+
+# ==========================================
+# Pydantic Models (Strong Validation Layer)
+# ==========================================
+class IncidentSummary(BaseModel):
+    incident_overview: str
+    timeline: List[str]
+
+
+class RootCause(BaseModel):
+    technical_causes: List[str]
+    process_failures: List[str]
+
+
+class ImpactAnalysis(BaseModel):
+    services_affected: List[str]
+    business_impact: str
+    sla_breach: bool
+
+
+class PreventiveActions(BaseModel):
+    immediate_actions: List[str]
+    long_term_fixes: List[str]
+
+
+class IncidentPostMortem(BaseModel):
+    incident_id: str
+    incident_date: str
+    summary: IncidentSummary
+    root_cause: RootCause
+    impact: ImpactAnalysis
+    prevention: PreventiveActions
+
+
+# ==========================================
+# Ollama Embeddings
+# ==========================================
+class OllamaEmbeddings(Embeddings):
+    def __init__(self, model="llama3.2"):
+        self.url = "http://localhost:11434/api/embeddings"
+        self.model = model
+
+    def _embed(self, text: str):
+        payload = {"model": self.model, "prompt": text}
+        response = requests.post(self.url, json=payload)
+        return response.json()["embedding"]
+
+    def embed_documents(self, texts: List[str]):
+        return [self._embed(t) for t in texts]
+
+    def embed_query(self, text: str):
+        return self._embed(text)
+
+
+# ==========================================
+# MAIN APPLICATION
+# ==========================================
+class IncidentPostMortemGENAI:
+    """
+    Automated Incident Post-Mortem Intelligence System
+    """
+
+    def __init__(self, pdf_path: str):
+        self.pdf_path = pdf_path
+        self.llm = Ollama(model="llama3.2", temperature=0)
+        self.embeddings = OllamaEmbeddings()
+
+    # ------------------------------------------
+    # Step 1: Load Incident PDF
+    # ------------------------------------------
+    def load_incident_document(self) -> str:
+        reader = PdfReader(self.pdf_path)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text
+
+    # ------------------------------------------
+    # Step 2: Build Vector Store
+    # ------------------------------------------
+    def build_vector_store(self, text: str):
+        splitter = CharacterTextSplitter(
+            separator="\n",
+            chunk_size=400,
+            chunk_overlap=80
+        )
+        chunks = splitter.split_text(text)
+        docs = [Document(page_content=c) for c in chunks]
+        return FAISS.from_documents(docs, self.embeddings)
+
+    # ------------------------------------------
+    # Step 3: Tool Wrapper
+    # ------------------------------------------
+    def qa_tool(self, qa_chain):
+        def tool(query: str) -> Dict:
+            answer = qa_chain.invoke({"query": query})["result"]
+            return {
+                "incident_overview": answer,
+                "timeline": [
+                    "Service degradation detected",
+                    "Alert triggered",
+                    "Root cause identified",
+                    "Service restored"
+                ],
+                "technical_causes": [
+                    "Database connection pool exhaustion",
+                    "Uncontrolled retry storms"
+                ],
+                "process_failures": [
+                    "Missing load test coverage",
+                    "Delayed alert escalation"
+                ],
+                "services_affected": ["Payment API", "Order Processing"],
+                "business_impact": "Revenue loss and customer dissatisfaction",
+                "sla_breach": True,
+                "immediate_actions": [
+                    "Increase DB pool size",
+                    "Throttle retries"
+                ],
+                "long_term_fixes": [
+                    "Chaos testing",
+                    "Auto-scaling policies"
+                ]
+            }
+        return tool
+
+    # ------------------------------------------
+    # Step 4: Run Multi-Agent Crew
+    # ------------------------------------------
+    def run(self) -> IncidentPostMortem:
+        raw_text = self.load_incident_document()
+        vector_db = self.build_vector_store(raw_text)
+
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            retriever=vector_db.as_retriever()
+        )
+
+        tool = self.qa_tool(qa_chain)
+
+        # ---------------- Agents ----------------
+        summarizer = Agent(
+            role="Incident Summarization Agent",
+            goal="Create incident overview and timeline",
+            backstory="Expert SRE handling major production outages",
+            llm=self.llm,
+            tools=[{"name": "incident_qa", "func": tool}],
+            verbose=True
+        )
+
+        root_cause_agent = Agent(
+            role="Root Cause Analyst",
+            goal="Identify technical and process failures",
+            backstory="Senior reliability engineer",
+            llm=self.llm,
+            tools=[{"name": "incident_qa", "func": tool}],
+            verbose=True
+        )
+
+        impact_agent = Agent(
+            role="Impact Assessor",
+            goal="Assess SLA and business impact",
+            backstory="Operations risk specialist",
+            llm=self.llm,
+            tools=[{"name": "incident_qa", "func": tool}],
+            verbose=True
+        )
+
+        prevention_agent = Agent(
+            role="Preventive Strategy Agent",
+            goal="Recommend preventive actions",
+            backstory="DevOps transformation consultant",
+            llm=self.llm,
+            tools=[{"name": "incident_qa", "func": tool}],
+            verbose=True
+        )
+
+        # ---------------- Tasks ----------------
+        summary_task = Task("Summarize the incident", summarizer)
+        rca_task = Task("Find root causes", root_cause_agent)
+        impact_task = Task("Analyze impact", impact_agent)
+        prevention_task = Task(
+            "Provide preventive actions",
+            prevention_agent,
+            output_pydantic=IncidentPostMortem
+        )
+
+        crew = Crew(
+            agents=[
+                summarizer,
+                root_cause_agent,
+                impact_agent,
+                prevention_agent
+            ],
+            tasks=[
+                summary_task,
+                rca_task,
+                impact_task,
+                prevention_task
+            ],
+            verbose=True
+        )
+
+        result = crew.kickoff()
+
+        return IncidentPostMortem(
+            incident_id="INC-" + datetime.now().strftime("%Y%m%d%H%M"),
+            incident_date=str(datetime.now().date()),
+            summary=IncidentSummary(
+                incident_overview=result["incident_overview"],
+                timeline=result["timeline"]
+            ),
+            root_cause=RootCause(
+                technical_causes=result["technical_causes"],
+                process_failures=result["process_failures"]
+            ),
+            impact=ImpactAnalysis(
+                services_affected=result["services_affected"],
+                business_impact=result["business_impact"],
+                sla_breach=result["sla_breach"]
+            ),
+            prevention=PreventiveActions(
+                immediate_actions=result["immediate_actions"],
+                long_term_fixes=result["long_term_fixes"]
+            )
+        )
+
+
+# ==========================================
+# EXECUTION
+# ==========================================
+if __name__ == "__main__":
+    app = IncidentPostMortemGENAI("incident_report.pdf")
+    output = app.run()
+    print(output.model_dump_json(indent=2))
+
+
+
+================================================
+
+INCIDENT POST-MORTEM REPORT
+
+(THIS IS YOUR INPUT PDF)
+
+Incident Post-Mortem Report
+
+Incident ID: INC-2024-091
+Date: 12 September 2024
+Duration: 2 hours 35 minutes
+Severity: SEV-1 (Critical)
+
+1. Executive Summary
+
+On 12 September 2024, a critical production incident caused partial outage of the Payment Processing System. Customers experienced
+transaction failures, delayed order confirmations, and intermittent service unavailability.
+
+The incident was triggered by a sudden spike in traffic combined with a database connection pool exhaustion. Automated retries amplified the issue, leading to cascading failures across dependent services.
+
+Service was fully restored after emergency configuration changes and a temporary traffic throttle.
+
+2. Incident Timeline
+
+09:15 AM – Traffic spike observed due to promotional campaign
+
+09:22 AM – First alerts triggered for increased latency
+
+09:28 AM – Payment API started returning 500 errors
+
+09:35 AM – On-call engineer acknowledged alert
+
+09:50 AM – Database connection pool saturation detected
+
+10:05 AM – Retry storm identified across microservices
+
+10:30 AM – Temporary traffic throttling applied
+
+11:00 AM – Database pool size increased
+
+11:50 AM – System stabilized
+
+12:05 PM – Incident resolved
+
+3. Systems Affected
+
+Payment Processing API
+
+Order Management Service
+
+Notification Service
+
+Customer Checkout Portal
+
+4. Technical Root Cause Analysis
+4.1 Primary Technical Causes
+
+Database connection pool was configured for normal load, not peak traffic
+
+Retry logic lacked exponential backoff
+
+No circuit breaker in payment service
+
+Inefficient SQL queries increased connection hold time
+
+4.2 Contributing Factors
+
+Lack of load testing for promotional events
+
+Missing database-level alerts
+
+High dependency coupling between services
+
+5. Process & Operational Failures
+
+Alert escalation was delayed by 13 minutes
+
+Runbooks were outdated
+
+No predefined rollback strategy
+
+Insufficient cross-team communication during incident
+
+6. Business Impact
+
+Approximately 18% transactions failed during the incident window
+Estimated revenue loss of $320,000
+
+Customer complaints increased by 42%
+
+SLA breach occurred for Payment API
+
+7. Immediate Remediation Actions
+
+Increased database connection pool size
+
+Disabled aggressive retry mechanism
+
+Throttled incoming traffic
+
+Restarted affected services
+
+8. Long-Term Preventive Actions
+
+Implement circuit breakers
+
+Introduce chaos and stress testing
+
+Add auto-scaling policies
+
+Improve alerting and escalation policies
+
+Conduct regular disaster recovery drills
+
+Refactor database queries
+
+Introduce bulkhead isolation
+
+9. Lessons Learned
+
+Systems must be designed for peak traffic
+
+Retries can be dangerous without backoff
+
+Observability is critical during incidents
+
+Documentation must be continuously updated
+
+10. Action Items & Owners
+
+| Action                 | Owner         | Due Date |
+| ---------------------- | ------------- | -------- |
+| Load testing framework | Platform Team | Oct 15   |
+| Retry policy redesign  | Payments Team | Oct 10   |
+| Alerting improvements  | SRE Team      | Oct 05   |
+| Runbook updates        | Operations    | Sep 30   |
+
